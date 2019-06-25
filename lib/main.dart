@@ -1,6 +1,12 @@
+import 'dart:io';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:image_picker/image_picker.dart';
 
 void main() {
   runApp(MyApp());
@@ -16,6 +22,39 @@ final ThemeData kDefaultTheme = ThemeData(
   primarySwatch: Colors.purple,
   accentColor: Colors.orangeAccent[400],
 );
+
+final googleSignIn = GoogleSignIn();
+
+final auth = FirebaseAuth.instance;
+
+Future<Null> _ensureLoggedIn() async {
+  GoogleSignInAccount user = googleSignIn.currentUser;
+
+  if (user == null) user = await googleSignIn.signInSilently();
+  if (user == null) user = await googleSignIn.signIn();
+  if (await auth.currentUser() == null) {
+    GoogleSignInAuthentication credentials =
+        await googleSignIn.currentUser.authentication;
+
+    await auth.signInWithCredential(GoogleAuthProvider.getCredential(
+        idToken: credentials.idToken, accessToken: credentials.accessToken));
+  }
+}
+
+void _handleSubmitted(String text) async {
+  await _ensureLoggedIn();
+
+  _sendMessage(text: text);
+}
+
+void _sendMessage({String text, String imgUrl}) {
+  Firestore.instance.collection("messages").add({
+    "text": text,
+    "imgUrl": imgUrl,
+    "senderName": googleSignIn.currentUser.displayName,
+    "senderPhotoUrl": googleSignIn.currentUser.photoUrl
+  });
+}
 
 class MyApp extends StatelessWidget {
   @override
@@ -51,12 +90,25 @@ class _ChatScreenState extends State<ChatScreen> {
         body: Column(
           children: <Widget>[
             Expanded(
-              child: ListView(
-                children: <Widget>[
-                  ChatMessage(),
-                  ChatMessage(),
-                  ChatMessage(),
-                ],
+              child: StreamBuilder(
+                stream: Firestore.instance.collection("messages").snapshots(),
+                builder: (context, snapshot) {
+                  switch (snapshot.connectionState) {
+                    case ConnectionState.none:
+                    case ConnectionState.waiting:
+                      return (Center(child: CircularProgressIndicator()));
+                    default:
+                      return ListView.builder(
+                        reverse: true,
+                        itemCount: snapshot.data.documents.length,
+                        itemBuilder: (context, index) {
+                          List r = snapshot.data.documents.reversed.toList();
+
+                          return ChatMessage(r[index].data);
+                        },
+                      );
+                  }
+                },
               ),
             ),
             Divider(
@@ -82,6 +134,11 @@ class TextCompose extends StatefulWidget {
 
 class _TextComposeState extends State<TextCompose> {
   bool _isComposing = false;
+  final _textController = TextEditingController();
+
+  void _resetMessage() {
+    _textController.text = "";
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +155,23 @@ class _TextComposeState extends State<TextCompose> {
             Container(
               child: IconButton(
                 icon: Icon(Icons.photo_camera),
-                onPressed: () {},
+                onPressed: () async {
+                  await _ensureLoggedIn();
+
+                  File imgFile =
+                      await ImagePicker.pickImage(source: ImageSource.camera);
+
+                  if (imgFile == null) return;
+                  
+                  StorageUploadTask task = FirebaseStorage.instance
+                      .ref()
+                      .child(googleSignIn.currentUser.id.toString() +
+                          DateTime.now().millisecondsSinceEpoch.toString())
+                      .putFile(imgFile);
+                  StorageTaskSnapshot taskSnapshot = await task.onComplete;
+                  String url = await taskSnapshot.ref.getDownloadURL();
+                  _sendMessage(imgUrl: url);
+                },
               ),
             ),
             Expanded(
@@ -110,6 +183,11 @@ class _TextComposeState extends State<TextCompose> {
                     _isComposing = text.length > 0;
                   });
                 },
+                controller: _textController,
+                onSubmitted: (text) {
+                  _handleSubmitted(text);
+                  _resetMessage();
+                },
               ),
             ),
             Container(
@@ -117,11 +195,21 @@ class _TextComposeState extends State<TextCompose> {
               child: Theme.of(context).platform == TargetPlatform.iOS
                   ? CupertinoButton(
                       child: Text("Enviar"),
-                      onPressed: _isComposing ? () {} : null,
+                      onPressed: _isComposing
+                          ? () {
+                              _handleSubmitted(_textController.text);
+                              _resetMessage();
+                            }
+                          : null,
                     )
                   : IconButton(
                       icon: Icon(Icons.send),
-                      onPressed: _isComposing ? () {} : null,
+                      onPressed: _isComposing
+                          ? () {
+                              _handleSubmitted(_textController.text);
+                              _resetMessage();
+                            }
+                          : null,
                     ),
             ),
           ],
@@ -132,6 +220,10 @@ class _TextComposeState extends State<TextCompose> {
 }
 
 class ChatMessage extends StatelessWidget {
+  final Map<String, dynamic> data;
+
+  ChatMessage(this.data);
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -142,7 +234,7 @@ class ChatMessage extends StatelessWidget {
           Container(
             margin: const EdgeInsets.only(right: 16),
             child: CircleAvatar(
-              backgroundImage: NetworkImage(""),
+              backgroundImage: NetworkImage(data["senderPhotoUrl"]),
             ),
           ),
           Expanded(
@@ -150,12 +242,17 @@ class ChatMessage extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 Text(
-                  "Daniel",
+                  data["senderName"],
                   style: Theme.of(context).textTheme.subhead,
                 ),
-                Container(                  
+                Container(
                   margin: const EdgeInsets.only(top: 5),
-                  child: Text("teste"),
+                  child: (data["imgUrl"] != null
+                      ? Image.network(
+                          data["imgUrl"],
+                          width: 250,
+                        )
+                      : Text(data["text"])),
                 ),
               ],
             ),
